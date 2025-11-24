@@ -16,7 +16,7 @@ from datasets import load_dataset
 HF_DATASET_ID = "vsi-bench/vsi-bench"        # Hugging Face dataset id for VSI-Bench
 DATA_SPLIT = "test"                          # dataset split to use
 OUTDIR = "vsi_videollama_results"
-MAX_SAMPLES = None                           # set to int for quick pilot (e.g., 100)
+MAX_SAMPLES = 10                             # set to int for quick pilot (e.g., 100) - CHANGE TO None FOR FULL RUN
 SEED = 42
 SPATIAL_TASK_TYPES = {"relative_distance", "absolute_distance", "route", "configurational"}  # adjust to dataset schema
 
@@ -31,9 +31,6 @@ GEN_TEMPERATURE = 0.0
 DEFAULT_FPS = 1
 DEFAULT_MAX_FRAMES = 8
 
-# ---- End CONFIG ----
-
-# Try to import eval helpers from the GitHub eval repo (adjust names if necessary)
 try:
     from eval_helpers import compute_metrics, load_gold  # change to actual module from repo
 except Exception:
@@ -81,14 +78,40 @@ PROMPT_TEMPLATES = {
 def ensure_outdir(path: str):
     os.makedirs(path, exist_ok=True)
 
+def validate_dataset_sample(sample: Dict[str, Any], idx: int) -> bool:
+    """
+    Validate that a dataset sample has the required fields.
+    Returns True if valid, False otherwise.
+    """
+    required_fields = ["question", "prompt", "text"]
+    has_question = any(sample.get(field) for field in required_fields)
+    
+    if not has_question:
+        print(f"Warning: Sample {idx} missing question field")
+        return False
+    
+    video_fields = ["video_path", "video", "video_path_local", "media"]
+    has_video = any(sample.get(field) for field in video_fields)
+    
+    if not has_video:
+        print(f"Warning: Sample {idx} missing video field")
+        return False
+    
+    return True
+
 def sample_spatial_subset(ds, max_samples=None, seed=SEED):
     random.seed(seed)
     rows = []
-    for item in ds:
+    for idx, item in enumerate(ds):
         # adapt these keys to actual dataset schema
         task_type = item.get("task_type") or item.get("type") or ""
         if task_type in SPATIAL_TASK_TYPES:
-            rows.append(item)
+            # Validate sample before adding
+            if validate_dataset_sample(item, idx):
+                rows.append(item)
+            else:
+                print(f"Skipping invalid sample at index {idx}")
+    
     if max_samples:
         rows = random.sample(rows, min(len(rows), max_samples))
     return rows
@@ -122,6 +145,22 @@ def run_arm(samples: List[Dict[str, Any]], arm_name: str, template: str,
         # prepare model input package for model_fn (video path + prompt + sampling params)
         video_path = s.get("video_path") or s.get("video") or s.get("video_path_local") or s.get("media", {}).get("video_path") if isinstance(s.get("media"), dict) else None
 
+        # Validate video path exists
+        if not video_path:
+            print(f"Warning: No video path found for sample {q_id}, skipping...")
+            results.append({
+                "q_id": q_id,
+                "task_type": s.get("task_type", "unknown"),
+                "question": question_text,
+                "gold": gold,
+                "prompt": prompt,
+                "video_path": None,
+                "raw": "ERROR: No video path provided",
+                "parsed": "",
+                "error": "missing_video_path"
+            })
+            continue
+
         model_input = {
             "prompt": prompt,
             "video_path": video_path,
@@ -132,8 +171,17 @@ def run_arm(samples: List[Dict[str, Any]], arm_name: str, template: str,
             "temperature": GEN_TEMPERATURE
         }
 
-        raw = model_fn(model_input)
-        parsed = parse_answer(raw)
+        # Wrap model inference in try-except to handle errors gracefully
+        try:
+            raw = model_fn(model_input)
+            parsed = parse_answer(raw)
+            error = None
+        except Exception as e:
+            print(f"Error processing sample {q_id}: {str(e)}")
+            raw = f"ERROR: {str(e)}"
+            parsed = ""
+            error = str(e)
+
         results.append({
             "q_id": q_id,
             "task_type": s.get("task_type", "unknown"),
@@ -142,7 +190,8 @@ def run_arm(samples: List[Dict[str, Any]], arm_name: str, template: str,
             "prompt": prompt,
             "video_path": video_path,
             "raw": raw,
-            "parsed": parsed
+            "parsed": parsed,
+            **({"error": error} if error else {})
         })
 
         if (i + 1) % 20 == 0 or (i + 1) == len(samples):
@@ -213,6 +262,10 @@ def main():
         do_sample = model_input.get("do_sample", GEN_DO_SAMPLE)
         temperature = model_input.get("temperature", GEN_TEMPERATURE)
 
+        # Validate video path
+        if not video_path or not os.path.exists(video_path):
+            raise ValueError(f"Invalid video path: {video_path}")
+
         # Build conversation according to VideoLLaMA processor expectations
         conversation = [
             {"role": "system", "content": "You are a helpful assistant."},
@@ -224,7 +277,7 @@ def main():
 
         inputs = processor(conversation=conversation, return_tensors="pt")
         # move tensors to device(s)
-        inputs = {k: (v.cuda() if isinstance(v, torch.Tensor) else v) for k, v in inputs.items()}
+        inputs = {k: (v.cuda() if isinstance(v, torch.Tensor) and USE_GPU else v) for k, v in inputs.items()}
         # optionally cast pixel values to model dtype if present
         if "pixel_values" in inputs:
             # match dtype to model
@@ -236,12 +289,24 @@ def main():
                                      max_new_tokens=gen_max_new_tokens,
                                      do_sample=do_sample,
                                      temperature=temperature)
+        
         # decode with processor (model card uses batch_decode)
         try:
             text = processor.batch_decode(out_ids, skip_special_tokens=True)[0].strip()
-        except Exception:
-            # fallback: use model tokenizer if available
-            text = out_ids  # likely not human readable; but should not happen with proper processor
+        except Exception as e:
+            # fallback: try using tokenizer directly or return error message
+            try:
+                if hasattr(model, 'tokenizer'):
+                    text = model.tokenizer.batch_decode(out_ids, skip_special_tokens=True)[0].strip()
+                else:
+                    text = f"ERROR: Failed to decode output - {str(e)}"
+            except:
+                text = f"ERROR: Failed to decode output - {str(e)}"
+        
+        # Clear GPU cache periodically to prevent OOM
+        if USE_GPU and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
         return text
 
     # Run arms

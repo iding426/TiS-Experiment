@@ -1,0 +1,76 @@
+name: vsibench
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - pytorch>=2.1.0
+  - torchvision>=0.16.0
+  - pytorch-cuda=12.1  # Adjust to your CUDA version (11.8, 12.1, etc.)
+  - pip:
+      # Core dependencies from pyproject.toml
+      - accelerate>=0.29.1
+      - black==24.1.0
+      - isort==5.13.2
+      - datasets==2.16.1
+      - evaluate>=0.4.0
+      - httpx==0.23.3
+      - jsonlines
+      - numexpr
+      - numpy==1.26.4
+      - peft>=0.2.0
+      - pybind11>=2.6.2
+      - pytablewriter
+      - sacrebleu>=1.5.0
+      - scikit-learn>=0.24.1
+      - sqlitedict==2.1.0
+      - timm
+      - einops
+      - ftfy
+      - openai
+      - opencv-python-headless
+      - av
+      - hf_transfer
+      - nltk
+      - sentencepiece==0.1.99
+      - yt-dlp
+      - pycocoevalcap
+      - tqdm-multiprocess
+      - transformers==4.45.0.dev0
+      - transformers-stream-generator
+      - zstandard
+      - pillow
+      - pyyaml
+      - sympy
+      - mpmath
+      - Jinja2
+      - openpyxl
+      - loguru
+      - tenacity==8.3.0
+      - wandb>=0.16.0
+      - tiktoken
+      - pre-commit
+      - pydantic
+      - packaging
+      - decord
+      - zss
+      - protobuf==3.20
+      
+      # Optional dependencies
+      - deepspeed
+      - pywsd
+      - spacy
+      - anls
+      - rouge
+      - capture_metric
+      - Levenshtein
+      - google-generativeai
+      - reka-api
+      
+      # Install local packages in editable mode (run after environment creation)
+      # pip install -e .
+      # pip install s2wrapper@git+https://github.com/bfshi/scaling_on_scales
+      # cd transformers && pip install -e . && cd ..
